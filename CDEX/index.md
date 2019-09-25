@@ -1,3 +1,3 @@
 ### About CDEX
 
-- [Introduce](./CDEX/index.md): Decentralized cross chain exchange protocol.
+- [Introduce](https://github.com/PolkaX/specs/blob/master/CDEX/index.md): Decentralized cross chain exchange protocol.
