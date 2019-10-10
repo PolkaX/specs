@@ -108,3 +108,273 @@ Alice 想要注册一个名为 "polka.dot" 的域名，但是发现该域名已�
 3.	更改owner
 4.	renew
 
+#### 合约实现
+
+目前官方提供的智能合约工具已经可以完成一些基础的功能了，所以接下来我们会使用 [ink](https://github.com/paritytech/ink) 实现一个简单的 PNS 。
+
+在此之前，建议先阅读 ink 相关的[教程](https://substrate.dev/substrate-contracts-workshop/#/)。
+
+这里我们主要实现**域名注册**、**设置地址**、**域名转移**以及**域名查询**这几个功能。
+
+##### 创建合约
+
+运行 `cargo contract new simple-pns`，新建一个合约项目。
+
+##### 定义合约结构
+
+``` rust
+    struct SimplePns {
+        /// A hashmap to store all name to addresses mapping
+        name_to_address: storage::HashMap<Hash, AccountId>,
+        /// A hashmap to store all name to owners mapping
+        name_to_owner: storage::HashMap<Hash, AccountId>,
+        default_address: storage::Value<AccountId>,
+    }
+```
+
+其中 `name_to_address` 是一个存储**域名**到**映射地址**的 hashmap，`name_to_owner` 是一个存储**域名**到**域名所有者**的 hashmap，`default_address` 是一个类型为 `AccountId` 的空地址。
+
+##### 初始化合约
+
+``` rust
+    impl Deploy for SimplePns {
+        /// Initializes contract with default address.
+        fn deploy(&mut self) {
+            self.default_address.set(AccountId::from([0x0; 32]));
+        }
+    }
+```
+
+##### 实现域名操作方法
+
+``` rust
+    impl SimplePns {
+        /// Register specific name with caller as owner
+        pub(external) fn register(&mut self, name: Hash) -> bool {
+            let caller = env.caller();
+            if self.is_name_exist_impl(name) {
+                return false
+            }
+            env.println(&format!("register name: {:?}, owner: {:?}", name, caller));
+            self.name_to_owner.insert(name, caller);
+            env.emit(Register {
+                name: name,
+                from: caller,
+            });
+            true
+        }
+
+        /// Set address for specific name
+        pub(external) fn set_address(&mut self, name: Hash, address: AccountId) -> bool {
+            let caller: AccountId = env.caller();
+            let owner: AccountId = self.get_owner_or_none(name);
+            env.println(&format!("set_address caller: {:?}, owner: {:?}", caller, owner));
+            if caller != owner {
+                return false
+            }
+            let old_address = self.name_to_address.insert(name, address);
+            env.emit(SetAddress {
+                name: name,
+                from: caller,
+                old_address: old_address,
+                new_address: address,
+            });
+            return true
+        }
+
+        /// Transfer owner to another address
+        pub(external) fn transfer(&mut self, name: Hash, to: AccountId) -> bool {
+            let caller: AccountId = env.caller();
+            let owner: AccountId = self.get_owner_or_none(name);
+            env.println(&format!("transfer caller: {:?}, owner: {:?}", caller, owner));
+            if caller != owner {
+                return false
+            }
+            let old_owner = self.name_to_owner.insert(name, to);
+            env.emit(Transfer {
+                name: name,
+                from: caller,
+                old_owner: old_owner,
+                new_owner: to,
+            });
+            return true
+        }
+
+        /// Get address for the specific name
+        pub(external) fn get_address(&self, name: Hash) -> AccountId {
+            let address: AccountId = self.get_address_or_none(name);
+            env.println(&format!("get_address name is {:?}, address is {:?}", name, address));
+            address
+        }
+
+        /// Check whether name is exist
+        pub(external) fn is_name_exist(&self, name: Hash) -> bool {
+            self.is_name_exist_impl(name)
+        }
+    }
+
+    /// Implement some private methods
+    impl SimplePns {
+        /// Returns an AccountId or default 0x00*32 if it is not set.
+        fn get_address_or_none(&self, name: Hash) -> AccountId {
+            let address = self.name_to_address.get(&name).unwrap_or(&self.default_address);
+            *address
+        }
+
+        /// Returns an AccountId or default 0x00*32 if it is not set.
+        fn get_owner_or_none(&self, name: Hash) -> AccountId {
+            let owner = self.name_to_owner.get(&name).unwrap_or(&self.default_address);
+            *owner
+        }
+
+        /// check whether name is exist
+        fn is_name_exist_impl(&self, name: Hash) -> bool {
+            let address = self.name_to_owner.get(&name);
+            if let None = address {
+                return false;
+            }
+            true
+        }
+    }
+```
+
+可以看到在上面具体的方法中我们使用 `env.emit` 触发的一些事件，所以我们还需要定义这些事件：
+
+``` rust
+    event Register {
+        name: Hash,
+        from: AccountId,
+    }
+
+    event SetAddress {
+        name: Hash,
+        from: AccountId,
+        old_address: Option<AccountId>,
+        new_address: AccountId,
+    }
+
+    event Transfer {
+        name: Hash,
+        from: AccountId,
+        old_owner: Option<AccountId>,
+        new_owner: AccountId,
+    }
+```
+
+##### 编写测试函数
+
+``` rust
+#[cfg(all(test, feature = "test-env"))]
+mod tests {
+    use super::*;
+    use ink_core::env;
+    type Types = ink_core::env::DefaultSrmlTypes;
+
+    #[test]
+    fn register_works() {
+        let alice = AccountId::from([0x1; 32]);
+        // let bob: AccountId = AccountId::from([0x2; 32]);
+        let name = Hash::from([0x99; 32]);
+
+        let mut contract = SimplePns::deploy_mock();
+        env::test::set_caller::<Types>(alice);
+
+        assert_eq!(contract.register(name), true);
+        assert_eq!(contract.register(name), false);
+    }
+
+    #[test]
+    fn set_address_works() {
+        let alice = AccountId::from([0x1; 32]);
+        let bob: AccountId = AccountId::from([0x2; 32]);
+        let name = Hash::from([0x99; 32]);
+
+        let mut contract = SimplePns::deploy_mock();
+        env::test::set_caller::<Types>(alice);
+
+        assert_eq!(contract.register(name), true);
+
+        // caller is not owner, set_address will be failed
+        env::test::set_caller::<Types>(bob);
+        assert_eq!(contract.set_address(name, bob), false);
+
+        // caller is owner, set_address will be successful
+        env::test::set_caller::<Types>(alice);
+        assert_eq!(contract.set_address(name, bob), true);
+
+        assert_eq!(contract.get_address(name), bob);
+    }
+
+    #[test]
+    fn transfer_works() {
+        let alice = AccountId::from([0x1; 32]);
+        let bob = AccountId::from([0x2; 32]);
+        let name = Hash::from([0x99; 32]);
+
+        let mut contract = SimplePns::deploy_mock();
+        env::test::set_caller::<Types>(alice);
+
+        assert_eq!(contract.register(name), true);
+
+        // transfer owner
+        assert_eq!(contract.transfer(name, bob), true);
+
+        // now owner is bob, alice set_address will be failed
+        assert_eq!(contract.set_address(name, bob), false);
+
+        env::test::set_caller::<Types>(bob);
+        // now owner is bob, set_address will be successful
+        assert_eq!(contract.set_address(name, bob), true);
+
+        assert_eq!(contract.get_address(name), bob);
+    }
+}
+```
+
+##### 运行测试
+
+使用命令 `cargo +nightly test` 来测试合约函数，如果得到下面的结果，证明测试通过。
+
+![](test.png)
+
+##### 编译合约和 ABI
+
+使用命令 `cargo contract build` 编译合约，并使用命令 `cargo +nightly build --features ink-generate-abi
+` 编译 ABI。
+
+运行成功之后 `target` 目录下会出现相应的 `wasm` 和 `json` 文件。
+
+##### 部署合约
+
+在部署合约之前我们要使用 `substrate --dev` 在本地启动一个 substrate 节点，然后克隆 [polkadot-app](https://github.com/polkadot-js/apps) 到本地，并连接到本地节点。
+
+成功启动之后，我们在 `contracts` 页面上传相应的文件。
+
+![](upload-contract.png)
+
+上传成功之后，我们还需要部署合约：
+
+![](deploy.png)
+
+然后按照下图输入相应的数值，点击部署：
+
+![](deploy-instance.png)
+
+部署成功后，就可以调用合约的具体函数了，由于目前 ink 以及相关的工具链还不是很完善，想要验证数据只能在合约中使用 `env.println` 来在 `substrate` 节点的控制台中输出相关信息。
+
+> 注意：`env.println` 只在 `substrate --dev` 模式下有效
+
+现在让我们测试一下注册域名能否成功吧~
+
+调用 `register` 函数：
+
+![](call-register.png)
+
+在控制台中查看调用日志：
+
+![](call-register-log.png)
+
+可以看到控制台中的 `name` 对应 `0x9e9de23f4d89d086c74c9fa23e4f4ceff6f9b68165b60b70290d1e5820f4bf4d`，调用成功！
+
+以上就是使用 ink 开发、测试、编译、部署以及调用合约的主要流程，具体代码见[simple_pns](https://github.com/PolkaX/simple_pns)。
+
